@@ -44,27 +44,10 @@ import torch
 import torch.nn as nn
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
-from timm.layers import (
-    trunc_normal_,
-    AvgPool2dSame,
-    DropPath,
-    calculate_drop_path_rates,
-    Mlp,
-    GlobalResponseNormMlp,
-    LayerNorm2d,
-    LayerNorm,
-    RmsNorm2d,
-    RmsNorm,
-    SimpleNorm2d,
-    SimpleNorm,
-    create_conv2d,
-    get_act_layer,
-    get_norm_layer,
-    make_divisible,
-    to_ntuple,
-    NormMlpClassifierHead,
-    ClassifierHead,
-)
+from timm.layers import trunc_normal_, AvgPool2dSame, DropPath, Mlp, GlobalResponseNormMlp, \
+    LayerNorm2d, LayerNorm, RmsNorm2d, RmsNorm, create_conv2d, get_act_layer, get_norm_layer, make_divisible, to_ntuple
+from timm.layers import SimpleNorm2d, SimpleNorm
+from timm.layers import NormMlpClassifierHead, ClassifierHead
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
 from ._manipulate import named_apply, checkpoint_seq
@@ -76,15 +59,7 @@ __all__ = ['ConvNeXt']  # model_registry will add each entrypoint fn to this
 class Downsample(nn.Module):
     """Downsample module for ConvNeXt."""
 
-    def __init__(
-            self,
-            in_chs: int,
-            out_chs: int,
-            stride: int = 1,
-            dilation: int = 1,
-            device=None,
-            dtype=None,
-    ) -> None:
+    def __init__(self, in_chs: int, out_chs: int, stride: int = 1, dilation: int = 1) -> None:
         """Initialize Downsample module.
 
         Args:
@@ -93,7 +68,6 @@ class Downsample(nn.Module):
             stride: Stride for downsampling.
             dilation: Dilation rate.
         """
-        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         avg_stride = stride if dilation == 1 else 1
         if stride > 1 or dilation > 1:
@@ -103,7 +77,7 @@ class Downsample(nn.Module):
             self.pool = nn.Identity()
 
         if in_chs != out_chs:
-            self.conv = create_conv2d(in_chs, out_chs, 1, stride=1, **dd)
+            self.conv = create_conv2d(in_chs, out_chs, 1, stride=1)
         else:
             self.conv = nn.Identity()
 
@@ -141,8 +115,6 @@ class ConvNeXtBlock(nn.Module):
             act_layer: Union[str, Callable] = 'gelu',
             norm_layer: Optional[Callable] = None,
             drop_path: float = 0.,
-            device=None,
-            dtype=None,
     ):
         """
 
@@ -161,7 +133,6 @@ class ConvNeXtBlock(nn.Module):
             norm_layer: Normalization layer (defaults to LN if not specified).
             drop_path: Stochastic depth probability.
         """
-        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         out_chs = out_chs or in_chs
         dilation = to_ntuple(2)(dilation)
@@ -178,18 +149,12 @@ class ConvNeXtBlock(nn.Module):
             dilation=dilation[0],
             depthwise=True,
             bias=conv_bias,
-            **dd,
         )
-        self.norm = norm_layer(out_chs, **dd)
-        self.mlp = mlp_layer(
-            out_chs,
-            int(mlp_ratio * out_chs),
-            act_layer=act_layer,
-            **dd,
-        )
-        self.gamma = nn.Parameter(ls_init_value * torch.ones(out_chs, **dd)) if ls_init_value is not None else None
+        self.norm = norm_layer(out_chs)
+        self.mlp = mlp_layer(out_chs, int(mlp_ratio * out_chs), act_layer=act_layer)
+        self.gamma = nn.Parameter(ls_init_value * torch.ones(out_chs)) if ls_init_value is not None else None
         if in_chs != out_chs or stride != 1 or dilation[0] != dilation[1]:
-            self.shortcut = Downsample(in_chs, out_chs, stride=stride, dilation=dilation[0], **dd)
+            self.shortcut = Downsample(in_chs, out_chs, stride=stride, dilation=dilation[0])
         else:
             self.shortcut = nn.Identity()
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -231,9 +196,7 @@ class ConvNeXtStage(nn.Module):
             use_grn: bool = False,
             act_layer: Union[str, Callable] = 'gelu',
             norm_layer: Optional[Callable] = None,
-            norm_layer_cl: Optional[Callable] = None,
-            device=None,
-            dtype=None,
+            norm_layer_cl: Optional[Callable] = None
     ) -> None:
         """Initialize ConvNeXt stage.
 
@@ -253,7 +216,6 @@ class ConvNeXtStage(nn.Module):
             norm_layer: Normalization layer.
             norm_layer_cl: Normalization layer for channels last.
         """
-        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         self.grad_checkpointing = False
 
@@ -261,7 +223,7 @@ class ConvNeXtStage(nn.Module):
             ds_ks = 2 if stride > 1 or dilation[0] != dilation[1] else 1
             pad = 'same' if dilation[1] > 1 else 0  # same padding needed if dilation used
             self.downsample = nn.Sequential(
-                norm_layer(in_chs, **dd),
+                norm_layer(in_chs),
                 create_conv2d(
                     in_chs,
                     out_chs,
@@ -270,7 +232,6 @@ class ConvNeXtStage(nn.Module):
                     dilation=dilation[0],
                     padding=pad,
                     bias=conv_bias,
-                    **dd,
                 ),
             )
             in_chs = out_chs
@@ -292,7 +253,6 @@ class ConvNeXtStage(nn.Module):
                 use_grn=use_grn,
                 act_layer=act_layer,
                 norm_layer=norm_layer if conv_mlp else norm_layer_cl,
-                **dd,
             ))
             in_chs = out_chs
         self.blocks = nn.Sequential(*stage_blocks)
@@ -364,8 +324,6 @@ class ConvNeXt(nn.Module):
             norm_eps: Optional[float] = None,
             drop_rate: float = 0.,
             drop_path_rate: float = 0.,
-            device=None,
-            dtype=None,
     ):
         """
         Args:
@@ -391,7 +349,6 @@ class ConvNeXt(nn.Module):
             drop_path_rate: Stochastic depth drop rate.
         """
         super().__init__()
-        dd = {'device': device, 'dtype': dtype}
         assert output_stride in (8, 16, 32)
         kernel_sizes = to_ntuple(4)(kernel_sizes)
         norm_layer, norm_layer_cl = _get_norm_layers(norm_layer, conv_mlp, norm_eps)
@@ -405,22 +362,22 @@ class ConvNeXt(nn.Module):
         if stem_type == 'patch':
             # NOTE: this stem is a minimal form of ViT PatchEmbed, as used in SwinTransformer w/ patch_size = 4
             self.stem = nn.Sequential(
-                nn.Conv2d(in_chans, dims[0], kernel_size=patch_size, stride=patch_size, bias=conv_bias, **dd),
-                norm_layer(dims[0], **dd),
+                nn.Conv2d(in_chans, dims[0], kernel_size=patch_size, stride=patch_size, bias=conv_bias),
+                norm_layer(dims[0]),
             )
             stem_stride = patch_size
         else:
             mid_chs = make_divisible(dims[0] // 2) if 'tiered' in stem_type else dims[0]
             self.stem = nn.Sequential(*filter(None, [
-                nn.Conv2d(in_chans, mid_chs, kernel_size=3, stride=2, padding=1, bias=conv_bias, **dd),
+                nn.Conv2d(in_chans, mid_chs, kernel_size=3, stride=2, padding=1, bias=conv_bias),
                 act_layer() if 'act' in stem_type else None,
-                nn.Conv2d(mid_chs, dims[0], kernel_size=3, stride=2, padding=1, bias=conv_bias, **dd),
-                norm_layer(dims[0], **dd),
+                nn.Conv2d(mid_chs, dims[0], kernel_size=3, stride=2, padding=1, bias=conv_bias),
+                norm_layer(dims[0]),
             ]))
             stem_stride = 4
 
         self.stages = nn.Sequential()
-        dp_rates = calculate_drop_path_rates(drop_path_rate, depths, stagewise=True)
+        dp_rates = [x.tolist() for x in torch.linspace(0, drop_path_rate, sum(depths)).split(depths)]
         stages = []
         prev_chs = dims[0]
         curr_stride = stem_stride
@@ -449,7 +406,6 @@ class ConvNeXt(nn.Module):
                 act_layer=act_layer,
                 norm_layer=norm_layer,
                 norm_layer_cl=norm_layer_cl,
-                **dd,
             ))
             prev_chs = out_chs
             # NOTE feature_info use currently assumes stage 0 == stride 1, rest are stride 2
@@ -461,13 +417,12 @@ class ConvNeXt(nn.Module):
         # otherwise pool -> norm -> fc, the default ConvNeXt ordering (pretrained FB weights)
         if head_norm_first:
             assert not head_hidden_size
-            self.norm_pre = norm_layer(self.num_features, **dd)
+            self.norm_pre = norm_layer(self.num_features)
             self.head = ClassifierHead(
                 self.num_features,
                 num_classes,
                 pool_type=global_pool,
                 drop_rate=self.drop_rate,
-                **dd,
             )
         else:
             self.norm_pre = nn.Identity()
@@ -479,7 +434,6 @@ class ConvNeXt(nn.Module):
                 drop_rate=self.drop_rate,
                 norm_layer=norm_layer,
                 act_layer='gelu',
-                **dd,
             )
             self.head_hidden_size = self.head.num_features
         named_apply(partial(_init_weights, head_init_scale=head_init_scale), self)
@@ -621,11 +575,13 @@ class ConvNeXt(nn.Module):
         """
         return self.head(x, pre_logits=True) if pre_logits else self.head(x)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_cls: bool = False) -> torch.Tensor:
         """Forward pass."""
         x = self.forward_features(x)
-        x = self.forward_head(x)
-        return x
+        if return_cls:
+            return x.mean(dim=[2, 3])
+        else:
+            return self.forward_head(x)
 
 
 def _init_weights(module: nn.Module, name: Optional[str] = None, head_init_scale: float = 1.0) -> None:
@@ -1106,33 +1062,6 @@ default_cfgs = generate_default_cfgs({
         hf_hub_id='timm/',
         mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD,
         input_size=(3, 256, 256), pool_size=(8, 8), crop_pct=1.0, num_classes=1024),
-
-    # NOTE dinov3 convnext weights are under a specific license, and downstream outputs must be shared with this
-    # https://ai.meta.com/resources/models-and-libraries/dinov3-license/
-    'convnext_tiny.dinov3_lvd1689m': _cfg(
-        hf_hub_id='timm/',
-        crop_pct=1.0,
-        num_classes=0,
-        license='dinov3',
-    ),
-    'convnext_small.dinov3_lvd1689m': _cfg(
-        hf_hub_id='timm/',
-        crop_pct=1.0,
-        num_classes=0,
-        license='dinov3',
-    ),
-    'convnext_base.dinov3_lvd1689m': _cfg(
-        hf_hub_id='timm/',
-        crop_pct=1.0,
-        num_classes=0,
-        license='dinov3',
-    ),
-    'convnext_large.dinov3_lvd1689m': _cfg(
-        hf_hub_id='timm/',
-        crop_pct=1.0,
-        num_classes=0,
-        license='dinov3',
-    ),
 
     "test_convnext.r160_in1k": _cfg(
         hf_hub_id='timm/',
