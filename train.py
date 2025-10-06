@@ -124,7 +124,7 @@ group.add_argument('--no-resume-opt', action='store_true', default=False,
 group.add_argument('--num-classes', type=int, default=None, metavar='N',
                    help='number of label classes (Model default if None)')
 group.add_argument('--gp', default=None, type=str, metavar='POOL',
-                   help='Global pool type, one of (fast, avg, max, avgmax, avgmaxc). Model default if None.')
+                   hel=p'Global pool type, one of (fast, avg, max, avgmax, avgmaxc). Model default if None.')
 group.add_argument('--img-size', type=int, default=None, metavar='N',
                    help='Image size (default: None => model default)')
 group.add_argument('--in-chans', type=int, default=None, metavar='N',
@@ -1074,6 +1074,23 @@ def main():
                 latest_results['validation'] = eval_metrics
             results.append(latest_results)
 
+        if utils.is_primary(args):
+            best_ckpt = os.path.join(output_dir, "model_best.pth.tar")
+    
+            # TSNE
+            extract_and_plot_tsne(
+                model, loader_eval, best_ckpt, device,
+                tsne_save_path=os.path.join(output_dir, "tsne.png"),
+                legend_save_path=os.path.join(output_dir, "tsne_legend.png")
+            )
+    
+            # 混淆矩阵
+            plot_confusion_matrix_from_ckpt(
+                model, loader_eval, best_ckpt, device,
+                cm_save_path=os.path.join(output_dir, "confusion_matrix.png"),
+                legend_save_path=os.path.join(output_dir, "confusion_colorbar_paper.png")
+            )
+
     except KeyboardInterrupt:
         pass
 
@@ -1378,6 +1395,223 @@ def validate(
 
     return metrics
 
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+import argparse
+import matplotlib.colors as mcolors
+
+def extract_and_plot_tsne(model, loader, checkpoint, device, 
+                          tsne_save_path="tsne.png", legend_save_path="tsne_legend.png"):
+
+    # -----------------------------
+    # 安全加载 checkpoint
+    # -----------------------------
+    try:
+        checkpoint_data = torch.load(checkpoint, map_location=device, weights_only=True)
+    except Exception as e:
+        print(f"[Warning] weights_only=True failed: {e}")
+        torch.serialization.add_safe_globals([argparse.Namespace])
+        checkpoint_data = torch.load(checkpoint, map_location=device, weights_only=False)
+
+    if "state_dict" in checkpoint_data:
+        model.load_state_dict(checkpoint_data["state_dict"])
+    else:
+        model.load_state_dict(checkpoint_data)
+    model.to(device)
+    model.eval()
+
+    # -----------------------------
+    # 提取特征
+    # -----------------------------
+    features, labels = [], []
+    with torch.no_grad():
+        for images, target in loader:
+            images = images.to(device)
+            feats = model.forward(images, return_cls=True)
+            features.append(feats.cpu())
+            labels.append(target.cpu())
+
+    features = torch.cat(features).numpy()
+    labels = torch.cat(labels).numpy()
+
+    # -----------------------------
+    # TSNE 降维
+    # -----------------------------
+    n_samples = features.shape[0]
+    if n_samples <= 1:
+        print("[Warning] Too few samples for t-SNE. Skipping.")
+        return
+
+    # 自动调整 perplexity，保证小于样本数量
+    perplexity = min(30, n_samples - 1)
+    tsne = TSNE(n_components=2, random_state=42, n_iter=1000, perplexity=perplexity)
+    feats_2d = tsne.fit_transform(features)
+
+    # -----------------------------
+    # 颜色配置（深色，固定顺序）
+    # -----------------------------
+    num_classes = len(np.unique(labels))
+    cmap = plt.cm.get_cmap("nipy_spectral", num_classes)
+
+    def darken_color(color, factor=0.8):
+        r, g, b, a = mcolors.to_rgba(color)
+        return (r * factor, g * factor, b * factor, a)
+
+    colors = [darken_color(cmap(i), 0.8) for i in range(num_classes)]
+
+    # -----------------------------
+    # 绘制散点图（正方形，无图例）
+    # -----------------------------
+    plt.figure(figsize=(6, 6))
+    for i in range(num_classes):
+        idx = np.where(labels == i)[0]
+        plt.scatter(
+            feats_2d[idx, 0],
+            feats_2d[idx, 1],
+            s=10,
+            color=colors[i],
+            alpha=0.6,
+        )
+
+    plt.axis("equal")
+    plt.xticks([])
+    plt.yticks([])
+    plt.tight_layout()
+    plt.savefig(tsne_save_path, dpi=300)
+    plt.close()
+    print(f"[t-SNE] Scatter plot saved to {tsne_save_path}")
+
+    # -----------------------------
+    # 绘制单独图例
+    # -----------------------------
+    plt.figure(figsize=(12, 3))
+    for i in range(num_classes):
+        plt.scatter([], [], color=colors[i], label=f"Class {i}", s=20)
+    plt.legend(ncol=10, fontsize=6, frameon=False)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(legend_save_path, dpi=300)
+    plt.close()
+    print(f"[t-SNE] Legend saved to {legend_save_path}")
+
+import os
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+import matplotlib.colors as mcolors
+
+def plot_confusion_matrix_from_ckpt(model, loader, checkpoint, device,
+                                    cm_save_path="confusion_matrix.png",
+                                    legend_save_path="confusion_legend.png"):
+    """
+    加载 checkpoint 权重后绘制高清论文风格混淆矩阵
+    """
+    # -----------------------------
+    # 安全加载 checkpoint
+    # -----------------------------
+    try:
+        checkpoint_data = torch.load(checkpoint, map_location=device, weights_only=True)
+    except Exception as e:
+        print(f"[Warning] weights_only=True failed: {e}")
+        checkpoint_data = torch.load(checkpoint, map_location=device, weights_only=False)
+
+    # 加载权重
+    if "state_dict" in checkpoint_data:
+        model.load_state_dict(checkpoint_data["state_dict"])
+    else:
+        model.load_state_dict(checkpoint_data)
+    
+    model.to(device)
+    model.eval()
+
+    # -----------------------------
+    # 预测
+    # -----------------------------
+    all_preds, all_labels = [], []
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device, non_blocking=True)
+            labels = labels.long().to(device, non_blocking=True)
+
+            outputs = model(images)
+            preds = outputs.argmax(dim=1)
+
+            all_preds.append(preds.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+
+    all_preds = np.concatenate(all_preds)
+    all_labels = np.concatenate(all_labels)
+
+    # -----------------------------
+    # 生成混淆矩阵百分比
+    # -----------------------------
+    cm = confusion_matrix(all_labels, all_preds)
+    num_classes = cm.shape[0]
+
+    cm_norm = cm.astype("float") / cm.sum(axis=1, keepdims=True)
+    cm_percent = np.nan_to_num(cm_norm * 100).round(0).astype(int)
+
+    # -----------------------------
+    # 配色
+    # -----------------------------
+    cmap = plt.cm.get_cmap("Blues", num_classes)
+    def darken_color(color, factor=0.8):
+        r, g, b, a = mcolors.to_rgba(color)
+        return (r * factor, g * factor, b * factor, a)
+    colors = [darken_color(cmap(i)) for i in range(num_classes)]
+
+    # -----------------------------
+    # 绘制混淆矩阵
+    # -----------------------------
+    fig, ax = plt.subplots(figsize=(7, 7), dpi=600)
+    ax.imshow(cm_percent, interpolation="nearest", cmap="Blues", aspect="equal")
+    ax.set_facecolor("white")
+    ax.set_title("Confusion Matrix (%)", fontsize=14, fontweight="bold", pad=10)
+    ax.set_xlabel("Predicted Label", fontsize=12)
+    ax.set_ylabel("True Label", fontsize=12)
+
+    ax.set_xticks(range(num_classes))
+    ax.set_xticklabels(range(num_classes), rotation=45, ha="center", fontsize=4)
+    ax.set_yticks(range(num_classes))
+    ax.set_yticklabels(range(num_classes), fontsize=4)
+    ax.tick_params(axis="both", which="major", length=0)
+
+    ax.set_xticks(np.arange(-0.5, num_classes, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, num_classes, 1), minor=True)
+    ax.grid(which="minor", color="lightgray", linestyle='-', linewidth=0.4)
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    font_size = 3
+    for i in range(num_classes):
+        for j in range(num_classes):
+            value = cm_percent[i, j]
+            if value == 0:
+                continue
+            color = "white" if value > 50 else "black"
+            ax.text(j, i, f"{value}", ha="center", va="center",
+                    color=color, fontsize=font_size, fontweight="bold", clip_on=True)
+
+    plt.tight_layout(pad=0.2)
+    plt.savefig(cm_save_path, dpi=600, bbox_inches="tight", pad_inches=0.05, facecolor="white")
+    plt.close()
+    print(f"[Confusion Matrix] Saved to {cm_save_path}")
+
+    # -----------------------------
+    # 绘制颜色条（百分比）
+    # -----------------------------
+    legend_path = os.path.join(output_dir, "confusion_colorbar_paper.png")
+    fig, ax = plt.subplots(figsize=(5, 0.4), dpi=600)
+    norm = plt.Normalize(vmin=0, vmax=100)
+    sm = plt.cm.ScalarMappable(cmap="Blues", norm=norm)
+    cbar = fig.colorbar(sm, cax=ax, orientation="horizontal")
+    cbar.set_label("Percentage (%)", fontsize=10)
+    cbar.ax.tick_params(labelsize=8)
+    plt.savefig(legend_path, dpi=600, bbox_inches="tight", pad_inches=0.02, facecolor="white")
+    plt.close()
+    print(f"[Confusion Matrix] High-quality colorbar saved to {legend_path}")
 
 if __name__ == '__main__':
     main()
