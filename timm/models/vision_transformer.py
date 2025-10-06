@@ -55,7 +55,6 @@ from timm.layers import (
     LayerNorm,
     RmsNorm,
     DropPath,
-    calculate_drop_path_rates,
     PatchDropout,
     trunc_normal_,
     lecun_normal_,
@@ -66,7 +65,6 @@ from timm.layers import (
     get_norm_layer,
     maybe_add_mask,
     LayerType,
-    LayerScale,
 )
 from ._builder import build_model_with_cfg
 from ._features import feature_take_indices
@@ -77,6 +75,35 @@ __all__ = ['VisionTransformer']  # model_registry will add each entrypoint fn to
 
 
 _logger = logging.getLogger(__name__)
+
+
+class LayerScale(nn.Module):
+    """Layer scale module.
+
+    References:
+      - https://arxiv.org/abs/2103.17239
+    """
+
+    def __init__(
+            self,
+            dim: int,
+            init_values: float = 1e-5,
+            inplace: bool = False,
+    ) -> None:
+        """Initialize LayerScale module.
+
+        Args:
+            dim: Dimension.
+            init_values: Initial value for scaling.
+            inplace: If True, perform inplace operations.
+        """
+        super().__init__()
+        self.inplace = inplace
+        self.gamma = nn.Parameter(init_values * torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply layer scaling."""
+        return x.mul_(self.gamma) if self.inplace else x * self.gamma
 
 
 class Block(nn.Module):
@@ -99,8 +126,6 @@ class Block(nn.Module):
             act_layer: Type[nn.Module] = nn.GELU,
             norm_layer: Type[nn.Module] = LayerNorm,
             mlp_layer: Type[nn.Module] = Mlp,
-            device=None,
-            dtype=None,
     ) -> None:
         """Initialize Block.
 
@@ -120,9 +145,7 @@ class Block(nn.Module):
             mlp_layer: MLP layer.
         """
         super().__init__()
-        dd = {'device': device, 'dtype': dtype}
-
-        self.norm1 = norm_layer(dim, **dd)
+        self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim,
             num_heads=num_heads,
@@ -133,12 +156,11 @@ class Block(nn.Module):
             attn_drop=attn_drop,
             proj_drop=proj_drop,
             norm_layer=norm_layer,
-            **dd
         )
-        self.ls1 = LayerScale(dim, init_values=init_values, **dd) if init_values else nn.Identity()
+        self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-        self.norm2 = norm_layer(dim, **dd)
+        self.norm2 = norm_layer(dim)
         self.mlp = mlp_layer(
             in_features=dim,
             hidden_features=int(dim * mlp_ratio),
@@ -146,9 +168,8 @@ class Block(nn.Module):
             norm_layer=norm_layer if scale_mlp_norm else None,
             bias=proj_bias,
             drop=proj_drop,
-            **dd,
         )
-        self.ls2 = LayerScale(dim, init_values=init_values, **dd) if init_values else nn.Identity()
+        self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -175,11 +196,8 @@ class ResPostBlock(nn.Module):
             act_layer: Type[nn.Module] = nn.GELU,
             norm_layer: Type[nn.Module] = LayerNorm,
             mlp_layer: Type[nn.Module] = Mlp,
-            device = None,
-            dtype = None,
     ) -> None:
         super().__init__()
-        dd = {'device': device, 'dtype': dtype}
         self.init_values = init_values
 
         self.attn = Attention(
@@ -192,9 +210,8 @@ class ResPostBlock(nn.Module):
             attn_drop=attn_drop,
             proj_drop=proj_drop,
             norm_layer=norm_layer,
-            **dd,
         )
-        self.norm1 = norm_layer(dim, **dd)
+        self.norm1 = norm_layer(dim)
         self.drop_path1 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         self.mlp = mlp_layer(
@@ -204,9 +221,8 @@ class ResPostBlock(nn.Module):
             norm_layer=norm_layer if scale_mlp_norm else None,
             bias=proj_bias,
             drop=proj_drop,
-            **dd,
         )
-        self.norm2 = norm_layer(dim, **dd)
+        self.norm2 = norm_layer(dim)
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         self.init_weights()
@@ -247,11 +263,8 @@ class ParallelScalingBlock(nn.Module):
             act_layer: Type[nn.Module] = nn.GELU,
             norm_layer: Type[nn.Module] = LayerNorm,
             mlp_layer: Optional[Type[nn.Module]] = None,
-            device = None,
-            dtype = None,
     ) -> None:
         super().__init__()
-        dd = {'device': device, 'dtype': dtype}
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         assert not scale_attn_norm and not scale_mlp_norm, 'Scale norms not supported'
         self.num_heads = num_heads
@@ -261,26 +274,26 @@ class ParallelScalingBlock(nn.Module):
         mlp_hidden_dim = int(mlp_ratio * dim)
         in_proj_out_dim = mlp_hidden_dim + 3 * dim
 
-        self.in_norm = norm_layer(dim, **dd)
-        self.in_proj = nn.Linear(dim, in_proj_out_dim, bias=qkv_bias, **dd)
+        self.in_norm = norm_layer(dim)
+        self.in_proj = nn.Linear(dim, in_proj_out_dim, bias=qkv_bias)
         self.in_split = [mlp_hidden_dim] + [dim] * 3
         if qkv_bias:
             self.register_buffer('qkv_bias', None)
             self.register_parameter('mlp_bias', None)
         else:
-            self.register_buffer('qkv_bias', torch.zeros(3 * dim, **dd), persistent=False)
-            self.mlp_bias = nn.Parameter(torch.zeros(mlp_hidden_dim, **dd))
+            self.register_buffer('qkv_bias', torch.zeros(3 * dim), persistent=False)
+            self.mlp_bias = nn.Parameter(torch.zeros(mlp_hidden_dim))
 
-        self.q_norm = norm_layer(self.head_dim, **dd) if qk_norm else nn.Identity()
-        self.k_norm = norm_layer(self.head_dim, **dd) if qk_norm else nn.Identity()
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
         self.attn_drop = nn.Dropout(attn_drop)
-        self.attn_out_proj = nn.Linear(dim, dim, bias=proj_bias, **dd)
+        self.attn_out_proj = nn.Linear(dim, dim, bias=proj_bias)
 
         self.mlp_drop = nn.Dropout(proj_drop)
         self.mlp_act = act_layer()
-        self.mlp_out_proj = nn.Linear(mlp_hidden_dim, dim, bias=proj_bias, **dd)
+        self.mlp_out_proj = nn.Linear(mlp_hidden_dim, dim, bias=proj_bias)
 
-        self.ls = LayerScale(dim, init_values=init_values, **dd) if init_values is not None else nn.Identity()
+        self.ls = LayerScale(dim, init_values=init_values) if init_values is not None else nn.Identity()
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -351,17 +364,14 @@ class ParallelThingsBlock(nn.Module):
             act_layer: Type[nn.Module] = nn.GELU,
             norm_layer: Type[nn.Module] = LayerNorm,
             mlp_layer: Type[nn.Module] = Mlp,
-            device = None,
-            dtype = None
     ) -> None:
-        dd = {'device': device, 'dtype': dtype}
         super().__init__()
         self.num_parallel = num_parallel
         self.attns = nn.ModuleList()
         self.ffns = nn.ModuleList()
         for _ in range(num_parallel):
             self.attns.append(nn.Sequential(OrderedDict([
-                ('norm', norm_layer(dim, **dd)),
+                ('norm', norm_layer(dim)),
                 ('attn', Attention(
                     dim,
                     num_heads=num_heads,
@@ -372,13 +382,12 @@ class ParallelThingsBlock(nn.Module):
                     attn_drop=attn_drop,
                     proj_drop=proj_drop,
                     norm_layer=norm_layer,
-                    **dd,
                 )),
-                ('ls', LayerScale(dim, init_values=init_values, **dd) if init_values else nn.Identity()),
+                ('ls', LayerScale(dim, init_values=init_values) if init_values else nn.Identity()),
                 ('drop_path', DropPath(drop_path) if drop_path > 0. else nn.Identity())
             ])))
             self.ffns.append(nn.Sequential(OrderedDict([
-                ('norm', norm_layer(dim, **dd)),
+                ('norm', norm_layer(dim)),
                 ('mlp', mlp_layer(
                     dim,
                     hidden_features=int(dim * mlp_ratio),
@@ -386,9 +395,8 @@ class ParallelThingsBlock(nn.Module):
                     norm_layer=norm_layer if scale_mlp_norm else None,
                     bias=proj_bias,
                     drop=proj_drop,
-                    **dd,
                 )),
-                ('ls', LayerScale(dim, init_values=init_values, **dd) if init_values else nn.Identity()),
+                ('ls', LayerScale(dim, init_values=init_values) if init_values else nn.Identity()),
                 ('drop_path', DropPath(drop_path) if drop_path > 0. else nn.Identity())
             ])))
 
@@ -482,8 +490,6 @@ class VisionTransformer(nn.Module):
             act_layer: Optional[LayerType] = None,
             block_fn: Type[nn.Module] = Block,
             mlp_layer: Type[nn.Module] = Mlp,
-            device=None,
-            dtype=None,
     ) -> None:
         """
         Args:
@@ -517,7 +523,6 @@ class VisionTransformer(nn.Module):
             block_fn: Transformer block layer.
         """
         super().__init__()
-        dd = {'device': device, 'dtype': dtype}
         assert global_pool in ('', 'avg', 'avgmax', 'max', 'token', 'map')
         assert class_token or global_pool != 'token'
         assert pos_embed in ('', 'none', 'learn')
@@ -552,18 +557,17 @@ class VisionTransformer(nn.Module):
             bias=not pre_norm,  # disable bias if pre-norm is used (e.g. CLIP)
             dynamic_img_pad=dynamic_img_pad,
             **embed_args,
-            **dd,
         )
         num_patches = self.patch_embed.num_patches
         reduction = self.patch_embed.feat_ratio() if hasattr(self.patch_embed, 'feat_ratio') else patch_size
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim, **dd)) if class_token else None
-        self.reg_token = nn.Parameter(torch.zeros(1, reg_tokens, embed_dim, **dd)) if reg_tokens else None
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) if class_token else None
+        self.reg_token = nn.Parameter(torch.zeros(1, reg_tokens, embed_dim)) if reg_tokens else None
         embed_len = num_patches if no_embed_class else num_patches + self.num_prefix_tokens
         if not pos_embed or pos_embed == 'none':
             self.pos_embed = None
         else:
-            self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim, **dd) * .02)
+            self.pos_embed = nn.Parameter(torch.randn(1, embed_len, embed_dim) * .02)
         self.pos_drop = nn.Dropout(p=pos_drop_rate)
         if patch_drop_rate > 0:
             self.patch_drop = PatchDropout(
@@ -572,9 +576,9 @@ class VisionTransformer(nn.Module):
             )
         else:
             self.patch_drop = nn.Identity()
-        self.norm_pre = norm_layer(embed_dim, **dd) if pre_norm else nn.Identity()
+        self.norm_pre = norm_layer(embed_dim) if pre_norm else nn.Identity()
 
-        dpr = calculate_drop_path_rates(drop_path_rate, depth)  # stochastic depth decay rule
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
             block_fn(
                 dim=embed_dim,
@@ -592,12 +596,11 @@ class VisionTransformer(nn.Module):
                 norm_layer=norm_layer,
                 act_layer=act_layer,
                 mlp_layer=mlp_layer,
-                **dd,
             )
             for i in range(depth)])
         self.feature_info = [
             dict(module=f'blocks.{i}', num_chs=embed_dim, reduction=reduction) for i in range(depth)]
-        self.norm = norm_layer(embed_dim, **dd) if final_norm and not use_fc_norm else nn.Identity()
+        self.norm = norm_layer(embed_dim) if final_norm and not use_fc_norm else nn.Identity()
 
         # Classifier Head
         if global_pool == 'map':
@@ -607,13 +610,12 @@ class VisionTransformer(nn.Module):
                 mlp_ratio=mlp_ratio,
                 norm_layer=norm_layer,
                 act_layer=act_layer,
-                **dd,
             )
         else:
             self.attn_pool = None
-        self.fc_norm = norm_layer(embed_dim, **dd) if final_norm and use_fc_norm else nn.Identity()
+        self.fc_norm = norm_layer(embed_dim) if final_norm and use_fc_norm else nn.Identity()
         self.head_drop = nn.Dropout(drop_rate)
-        self.head = nn.Linear(self.embed_dim, num_classes, **dd) if num_classes > 0 else nn.Identity()
+        self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
         if weight_init != 'skip':
             self.init_weights(weight_init)
@@ -643,7 +645,6 @@ class VisionTransformer(nn.Module):
             nn.init.normal_(self.cls_token, std=1e-6)
         if self.reg_token is not None:
             nn.init.normal_(self.reg_token, std=1e-6)
-
         named_apply(get_init_weights_vit(mode, head_bias), self)
 
     def _init_weights(self, m: nn.Module) -> None:
@@ -988,10 +989,13 @@ class VisionTransformer(nn.Module):
         x = self.head_drop(x)
         return x if pre_logits else self.head(x)
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None, return_cls: bool = False) -> torch.Tensor:
         x = self.forward_features(x, attn_mask=attn_mask)
-        x = self.forward_head(x)
-        return x
+        if return_cls:
+            return x[:, 0, :]   # 取 CLS token [B, C]
+        else:
+            x = self.forward_head(x)
+            return x
 
 
 def init_weights_vit_timm(module: nn.Module, name: str = '') -> None:
@@ -1415,8 +1419,6 @@ def checkpoint_filter_fn(
             # remap final nn.Linear if it exists outside of the timm .trunk (ie in visual.head.proj)
             out_dict['head.weight'] = state_dict['visual.head.proj.weight']
             out_dict['head.bias'] = torch.zeros(state_dict['visual.head.proj.weight'].shape[0])
-    elif 'module.visual.trunk.pos_embed' in state_dict:
-        prefix = 'module.visual.trunk.'
     elif 'preprocessor.patchifier.proj.weight' in state_dict:
         state_dict = _convert_aimv2(state_dict, model)
 
@@ -1735,9 +1737,7 @@ default_cfgs = {
     'vit_medium_patch16_gap_384.sw_in12k_ft_in1k': _cfg(
         hf_hub_id='timm/',
         input_size=(3, 384, 384), crop_pct=0.95, crop_mode='squash'),
-    'vit_betwixt_patch16_gap_256.untrained': _cfg(
-        input_size=(3, 256, 256), crop_pct=0.95),
-    'vit_base_patch16_gap_224.untrained': _cfg(),
+    'vit_base_patch16_gap_224': _cfg(),
 
     # CLIP pretrained image tower and related fine-tuned weights
     'vit_base_patch32_clip_224.laion2b_ft_in12k_in1k': _cfg(
@@ -1922,31 +1922,6 @@ default_cfgs = {
         notes=('natively QuickGELU, use quickgelu model variant for original results',),
         crop_pct=1.0, input_size=(3, 378, 378), num_classes=1024),
 
-    # 'vit_large_patch14_clip_224.metaclip2_worldwide': _cfg(
-    #     hf_hub_id='timm/',
-    #     license='cc-by-nc-4.0',
-    #     notes=('natively QuickGELU, use quickgelu model variant for original results',),
-    #     mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD, crop_pct=1.0, num_classes=768),
-    'vit_huge_patch14_clip_224.metaclip2_worldwide': _cfg(
-        hf_hub_id='timm/',
-        license='cc-by-nc-4.0',
-        notes=('natively QuickGELU, use quickgelu model variant for original results',),
-        mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD, crop_pct=1.0, num_classes=1024),
-    'vit_huge_patch14_clip_378.metaclip2_worldwide': _cfg(
-        hf_hub_id='timm/',
-        license='cc-by-nc-4.0',
-        mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD,
-        input_size=(3, 378, 378), crop_pct=1.0, crop_mode='squash', num_classes=1024),
-    'vit_gigantic_patch14_clip_224.metaclip2_worldwide': _cfg(
-        hf_hub_id='timm/',
-        license='cc-by-nc-4.0',
-        mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD, crop_pct=1.0, num_classes=1280),
-    'vit_gigantic_patch14_clip_378.metaclip2_worldwide': _cfg(
-        hf_hub_id='timm/',
-        license='cc-by-nc-4.0',
-        mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD,
-        input_size=(3, 378, 378), crop_pct=1.0, crop_mode='squash', num_classes=1280),
-
     'vit_base_patch32_clip_224.metaclip_2pt5b': _cfg(
         hf_hub_id='timm/',
         license='cc-by-nc-4.0',
@@ -2009,13 +1984,6 @@ default_cfgs = {
         notes=('natively QuickGELU, use quickgelu model variant for original results',),
         mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD,
         crop_pct=1.0, input_size=(3, 336, 336), num_classes=768),
-
-    'vit_large_patch14_clip_224.apple_mclip2_dfndr2b': _cfg(
-        hf_hub_id='timm/',
-        num_classes=768,
-        mean=OPENAI_CLIP_MEAN, std=OPENAI_CLIP_STD, crop_pct=1.0,
-        license='apple-amlr'
-    ),
 
     # experimental (may be removed)
     'vit_base_patch32_plus_256.untrained': _cfg(url='', input_size=(3, 256, 256), crop_pct=0.95),
@@ -2966,7 +2934,7 @@ def vit_betwixt_patch16_gap_256(pretrained: bool = False, **kwargs) -> VisionTra
         patch_size=16, embed_dim=640, depth=12, num_heads=10, class_token=False,
         global_pool='avg', qkv_bias=False, init_values=1e-6, fc_norm=False)
     model = _create_vision_transformer(
-        'vit_betwixt_patch16_gap_256', pretrained=pretrained, **dict(model_args, **kwargs))
+        'vit_medium_patch16_gap_256', pretrained=pretrained, **dict(model_args, **kwargs))
     return model
 
 
@@ -3210,20 +3178,6 @@ def vit_gigantic_patch14_clip_224(pretrained: bool = False, **kwargs) -> VisionT
     )
     model = _create_vision_transformer(
         'vit_gigantic_patch14_clip_224', pretrained=pretrained, **dict(model_args, **kwargs))
-    return model
-
-
-@register_model
-def vit_gigantic_patch14_clip_378(pretrained: bool = False, **kwargs) -> VisionTransformer:
-    """ ViT-bigG model (ViT-G/14) from `Scaling Vision Transformers` - https://arxiv.org/abs/2106.04560
-    Pretrained weights from CLIP image tower.
-    """
-    model_args = dict(
-        patch_size=14, embed_dim=1664, mlp_ratio=64/13, depth=48, num_heads=16, pre_norm=True,
-        norm_layer=partial(LayerNorm, eps=1e-5),
-    )
-    model = _create_vision_transformer(
-        'vit_gigantic_patch14_clip_378', pretrained=pretrained, **dict(model_args, **kwargs))
     return model
 
 
