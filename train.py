@@ -20,6 +20,7 @@ import importlib
 import json
 import logging
 import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 import time
 from collections import OrderedDict
 from contextlib import suppress
@@ -82,7 +83,7 @@ group = parser.add_argument_group('Dataset parameters')
 # Keep this argument outside the dataset group because it is positional.
 parser.add_argument('data', nargs='?', metavar='DIR', const=None,
                     help='path to dataset (positional is *deprecated*, use --data-dir)')
-group.add_argument('--data-dir', metavar='DIR',
+group.add_argument('--data-dir', metavar='DIR', default='./weather',
                     help='path to dataset (root dir)')
 group.add_argument('--dataset', metavar='NAME', default='',
                     help='dataset type + name ("<type>/<name>") (default: ImageFolder or ImageTar if empty)')
@@ -109,11 +110,11 @@ group.add_argument('--dataset-trust-remote-code', action='store_true', default=F
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
-group.add_argument('--model', default='resnet50', type=str, metavar='MODEL',
+group.add_argument('--model', default='swin_base_patch4_window7_224.ms_in1k', type=str, metavar='MODEL',
                    help='Name of model to train (default: "resnet50")')
 group.add_argument('--pretrained', action='store_true', default=False,
                    help='Start with pretrained version of specified network (if avail)')
-group.add_argument('--pretrained-path', default=None, type=str,
+group.add_argument('--pretrained-path', default='./swin_base_patch4_window7_224.ms_in1k.bin', type=str,
                    help='Load this checkpoint as if they were the pretrained weights (with adaptation).')
 group.add_argument('--initial-checkpoint', default='', type=str, metavar='PATH',
                    help='Load this checkpoint into model after initialization (default: none)')
@@ -121,10 +122,10 @@ group.add_argument('--resume', default='', type=str, metavar='PATH',
                    help='Resume full model and optimizer state from checkpoint (default: none)')
 group.add_argument('--no-resume-opt', action='store_true', default=False,
                    help='prevent resume of optimizer state when resuming model')
-group.add_argument('--num-classes', type=int, default=None, metavar='N',
+group.add_argument('--num-classes', type=int, default=4, metavar='N',
                    help='number of label classes (Model default if None)')
 group.add_argument('--gp', default=None, type=str, metavar='POOL',
-                   hel=p'Global pool type, one of (fast, avg, max, avgmax, avgmaxc). Model default if None.')
+                   help='Global pool type, one of (fast, avg, max, avgmax, avgmaxc). Model default if None.')
 group.add_argument('--img-size', type=int, default=None, metavar='N',
                    help='Image size (default: None => model default)')
 group.add_argument('--in-chans', type=int, default=None, metavar='N',
@@ -139,8 +140,8 @@ group.add_argument('--std', type=float, nargs='+', default=None, metavar='STD',
                    help='Override std deviation of dataset')
 group.add_argument('--interpolation', default='', type=str, metavar='NAME',
                    help='Image resize interpolation type (overrides model)')
-group.add_argument('-b', '--batch-size', type=int, default=128, metavar='N',
-                   help='Input batch size for training (default: 128)')
+group.add_argument('-b', '--batch-size', type=int, default=32, metavar='N',
+                   help='Input batch size for training (default: 256)')
 group.add_argument('-vb', '--validation-batch-size', type=int, default=None, metavar='N',
                    help='Validation batch size override (default: None)')
 group.add_argument('--channels-last', action='store_true', default=False,
@@ -220,9 +221,9 @@ group.add_argument('--sched-on-updates', action='store_true', default=False,
                    help='Apply LR scheduler step on update instead of epoch end.')
 group.add_argument('--lr', type=float, default=None, metavar='LR',
                    help='learning rate, overrides lr-base if set (default: None)')
-group.add_argument('--lr-base', type=float, default=0.1, metavar='LR',
+group.add_argument('--lr-base', type=float, default=0.000125, metavar='LR',
                    help='base learning rate: lr = lr_base * global_batch_size / base_size')
-group.add_argument('--lr-base-size', type=int, default=256, metavar='DIV',
+group.add_argument('--lr-base-size', type=int, default=128, metavar='DIV',
                    help='base learning rate batch size (divisor, default: 256).')
 group.add_argument('--lr-base-scale', type=str, default='', metavar='SCALE',
                    help='base learning rate vs batch_size scaling ("linear", "sqrt", based on opt if empty)')
@@ -244,7 +245,7 @@ group.add_argument('--warmup-lr', type=float, default=1e-5, metavar='LR',
                    help='warmup learning rate (default: 1e-5)')
 group.add_argument('--min-lr', type=float, default=0, metavar='LR',
                    help='lower lr bound for cyclic schedulers that hit 0 (default: 0)')
-group.add_argument('--epochs', type=int, default=300, metavar='N',
+group.add_argument('--epochs', type=int, default=50, metavar='N',
                    help='number of epochs to train (default: 300)')
 group.add_argument('--epoch-repeats', type=float, default=0., metavar='N',
                    help='epoch repeat multiplier (number of times to repeat dataset epoch per train epoch).')
@@ -372,7 +373,7 @@ group.add_argument('--log-interval', type=int, default=50, metavar='N',
                    help='how many batches to wait before logging training status')
 group.add_argument('--recovery-interval', type=int, default=0, metavar='N',
                    help='how many batches to wait before writing recovery checkpoint')
-group.add_argument('--checkpoint-hist', type=int, default=10, metavar='N',
+group.add_argument('--checkpoint-hist', type=int, default=1, metavar='N',
                    help='number of checkpoints to keep (default: 10)')
 group.add_argument('-j', '--workers', type=int, default=4, metavar='N',
                    help='how many training processes to use (default: 4)')
@@ -382,7 +383,7 @@ group.add_argument('--pin-mem', action='store_true', default=False,
                    help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
 group.add_argument('--no-prefetcher', action='store_true', default=False,
                    help='disable fast prefetcher')
-group.add_argument('--output', default='', type=str, metavar='PATH',
+group.add_argument('--output', default='./result', type=str, metavar='PATH',
                    help='path to output folder (default: none, current dir)')
 group.add_argument('--experiment', default='', type=str, metavar='NAME',
                    help='name of train experiment, name of sub-folder for output')
@@ -1404,7 +1405,6 @@ import matplotlib.colors as mcolors
 
 def extract_and_plot_tsne(model, loader, checkpoint, device, 
                           tsne_save_path="tsne.png", legend_save_path="tsne_legend.png"):
-
     # -----------------------------
     # 安全加载 checkpoint
     # -----------------------------
@@ -1584,7 +1584,7 @@ def plot_confusion_matrix_from_ckpt(model, loader, checkpoint, device,
     ax.grid(which="minor", color="lightgray", linestyle='-', linewidth=0.4)
     ax.tick_params(which="minor", bottom=False, left=False)
 
-    font_size = 3
+    font_size = 10
     for i in range(num_classes):
         for j in range(num_classes):
             value = cm_percent[i, j]
@@ -1602,6 +1602,7 @@ def plot_confusion_matrix_from_ckpt(model, loader, checkpoint, device,
     # -----------------------------
     # 绘制颜色条（百分比）
     # -----------------------------
+    output_dir = './result'
     legend_path = os.path.join(output_dir, "confusion_colorbar_paper.png")
     fig, ax = plt.subplots(figsize=(5, 0.4), dpi=600)
     norm = plt.Normalize(vmin=0, vmax=100)

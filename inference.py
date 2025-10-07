@@ -61,8 +61,8 @@ parser.add_argument('--split', metavar='NAME', default='validation',
                     help='dataset split (default: validation)')
 parser.add_argument('--model', '-m', metavar='MODEL', default='resnet50',
                     help='model architecture (default: resnet50)')
-parser.add_argument('-j', '--workers', default=2, type=int, metavar='N',
-                    help='number of data loading workers (default: 2)')
+parser.add_argument('-j', '--workers', default=24, type=int, metavar='N',
+                    help='number of data loading workers (default: 24)')
 parser.add_argument('-b', '--batch-size', default=256, type=int,
                     metavar='N', help='mini-batch size (default: 256)')
 parser.add_argument('--img-size', default=None, type=int,
@@ -143,7 +143,7 @@ parser.add_argument('--output-col', type=str, default=None,
                     help='name for logit/probs output column(s)')
 parser.add_argument('--output-type', type=str, default='prob',
                     help='output type colum ("prob" for probabilities, "logit" for raw logits)')
-parser.add_argument('--label-type', type=str, default='description',
+parser.add_argument('--label-type', type=str, default='name',
                     help='type of label to output, one of  "none", "name", "description", "detailed"')
 parser.add_argument('--include-index', action='store_true', default=False,
                     help='include the class index in results')
