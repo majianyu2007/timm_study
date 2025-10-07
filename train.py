@@ -110,11 +110,11 @@ group.add_argument('--dataset-trust-remote-code', action='store_true', default=F
 
 # Model parameters
 group = parser.add_argument_group('Model parameters')
-group.add_argument('--model', default='swin_base_patch4_window7_224.ms_in1k', type=str, metavar='MODEL',
+group.add_argument('--model', default='vit_base_patch16_clip_224.openai_ft_in1k', type=str, metavar='MODEL',
                    help='Name of model to train (default: "resnet50")')
 group.add_argument('--pretrained', action='store_true', default=False,
                    help='Start with pretrained version of specified network (if avail)')
-group.add_argument('--pretrained-path', default='./swin_base_patch4_window7_224.ms_in1k.bin', type=str,
+group.add_argument('--pretrained-path', default='./vit_base_patch16_clip_224.openai_ft_in1k.bin', type=str,
                    help='Load this checkpoint as if they were the pretrained weights (with adaptation).')
 group.add_argument('--initial-checkpoint', default='', type=str, metavar='PATH',
                    help='Load this checkpoint into model after initialization (default: none)')
@@ -221,7 +221,7 @@ group.add_argument('--sched-on-updates', action='store_true', default=False,
                    help='Apply LR scheduler step on update instead of epoch end.')
 group.add_argument('--lr', type=float, default=None, metavar='LR',
                    help='learning rate, overrides lr-base if set (default: None)')
-group.add_argument('--lr-base', type=float, default=0.000125, metavar='LR',
+group.add_argument('--lr-base', type=float, default=0.001, metavar='LR',
                    help='base learning rate: lr = lr_base * global_batch_size / base_size')
 group.add_argument('--lr-base-size', type=int, default=128, metavar='DIV',
                    help='base learning rate batch size (divisor, default: 256).')
@@ -245,7 +245,7 @@ group.add_argument('--warmup-lr', type=float, default=1e-5, metavar='LR',
                    help='warmup learning rate (default: 1e-5)')
 group.add_argument('--min-lr', type=float, default=0, metavar='LR',
                    help='lower lr bound for cyclic schedulers that hit 0 (default: 0)')
-group.add_argument('--epochs', type=int, default=50, metavar='N',
+group.add_argument('--epochs', type=int, default=40, metavar='N',
                    help='number of epochs to train (default: 300)')
 group.add_argument('--epoch-repeats', type=float, default=0., metavar='N',
                    help='epoch repeat multiplier (number of times to repeat dataset epoch per train epoch).')
@@ -383,7 +383,7 @@ group.add_argument('--pin-mem', action='store_true', default=False,
                    help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
 group.add_argument('--no-prefetcher', action='store_true', default=False,
                    help='disable fast prefetcher')
-group.add_argument('--output', default='./result', type=str, metavar='PATH',
+group.add_argument('--output', default='/content/drive/MyDrive/results', type=str, metavar='PATH',
                    help='path to output folder (default: none, current dir)')
 group.add_argument('--experiment', default='', type=str, metavar='NAME',
                    help='name of train experiment, name of sub-folder for output')
@@ -1602,7 +1602,7 @@ def plot_confusion_matrix_from_ckpt(model, loader, checkpoint, device,
     # -----------------------------
     # 绘制颜色条（百分比）
     # -----------------------------
-    output_dir = './result'
+    output_dir = '/content/drive/MyDrive/results'
     legend_path = os.path.join(output_dir, "confusion_colorbar_paper.png")
     fig, ax = plt.subplots(figsize=(5, 0.4), dpi=600)
     norm = plt.Normalize(vmin=0, vmax=100)
