@@ -119,7 +119,7 @@ Testing notebook.ipynb
 /*.png
 /*.zip
 /*.tar.*
-vit_base_patch16_clip_224.laion2b_ft_in1k.bin
+vit_base_patch16_clip_224.openai_ft_in1k.bin
 eva02_base_patch14_224.mim_in22k.bin
 convnextv2_base.fcmae_ft_in22k_in1k.bin
 swin_base_patch4_window7_224.ms_in1k.bin
